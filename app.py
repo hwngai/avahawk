@@ -1,7 +1,6 @@
 import time
 import gradio as gr
 import logging
-import faiss
 import PyPDF2
 import docx2txt
 import openai
@@ -20,6 +19,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 import os
 import shutil
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -118,6 +119,7 @@ def input_question(question):
     context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
     prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
     prompt = prompt_template.format(context=context_text, question=question)
+    prompt = generate_response(model, tokenizer, prompt)
     return prompt
 
 def user(user_message, history):
@@ -137,9 +139,36 @@ def generate_response_avahawk(input_text):
         bot_message = input_question(input_text)
         return bot_message
 
-def generate_response(input_text):
-    return input_text
+def generate_response(model, tokenizer, instruction, max_new_tokens=1024, temperature=1.0, top_k=50, top_p=0.9):
+    PROMPT_TEMPLATE = "### Câu hỏi:\n{instruction}\n\n### Trả lời:"
+    input_prompt = PROMPT_TEMPLATE.format_map({"instruction": instruction})
+    
+    input_ids = tokenizer(input_prompt, return_tensors="pt")
+    
+    outputs = model.generate(
+        inputs=input_ids["input_ids"].to("cuda"),
+        attention_mask=input_ids["attention_mask"].to("cuda"),
+        do_sample=True,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id
+    )
+    
+    response = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+    response = response.split("### Trả lời:")[1]
+    
+    return response
 
+
+model_path = "vinai/PhoGPT-7B5-Instruct"
+config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+config.init_device = "cuda"
+model = AutoModelForCausalLM.from_pretrained(model_path, config=config, torch_dtype=torch.bfloat16, trust_remote_code=True)
+model.eval()
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
 with gr.Blocks() as demo:
     gr.Markdown('<h2 style="font-style: italic;">AvaHawk: Document Chatbot with PhoGPT VinAI RAG Integration</h2>')
@@ -169,7 +198,7 @@ with gr.Blocks() as demo:
         text_button = gr.Button("Build the Bot!!!")
         text_button.click(build_the_bot, [document_file], text_output)
     with gr.Tab("AvaHawk"):
-        chatbot = gr.Chatbot(avatar_images=["assets/user.png", "assets/2023-12-12 21.32.53.jpg"], height=350)
+        chatbot = gr.Chatbot(avatar_images=["assets/user.png", "assets/2023-12-12 21.32.53.jpg"], height=450)
         msg = gr.Textbox(label="Enter your query here")
         clear = gr.ClearButton([msg, chatbot])
 
@@ -191,7 +220,7 @@ with gr.Blocks() as demo:
         )
         clear.click(lambda: None, None, chatbot, queue=False)
     with gr.Tab("PhoGPT"):
-        chatbot = gr.Chatbot(avatar_images=["assets/user.png", "assets/_wjiAzCq_400x400.jpeg"], height=350)
+        chatbot = gr.Chatbot(avatar_images=["assets/user.png", "assets/_wjiAzCq_400x400.jpeg"], height=450)
         msg = gr.Textbox(label="Enter your query here")
         clear = gr.Button("Clear")
 
@@ -201,7 +230,7 @@ with gr.Blocks() as demo:
 
 
         def bot(history):
-            bot_message = generate_response(history[-1][0])
+            bot_message = generate_response(model, tokenizer, history[-1][0])
             history[-1][1] = ""
             for character in bot_message:
                 history[-1][1] += character
@@ -214,4 +243,4 @@ with gr.Blocks() as demo:
         )
         clear.click(lambda: None, None, chatbot, queue=False)
 
-demo.queue().launch(debug=True)
+demo.queue().launch(debug=True, share=True)

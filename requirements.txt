@@ -1,7 +1,10 @@
 transformers
 sentence_transformers
 gradio
-InstructorEmbedding
-unstructured[local-inference]
-openai
 pypdf2<3.0
+PyPDF2
+openai
+docx2txt
+langchain
+InstructorEmbedding
+unstructured
