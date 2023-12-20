@@ -5,6 +5,9 @@ pypdf2<3.0
 PyPDF2
 openai
 docx2txt
+pdf2image
 langchain
 InstructorEmbedding
 unstructured
+einops
+chromadb

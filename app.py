@@ -16,7 +16,10 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain.vectorstores.chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import WebBaseLoader
 from langchain.schema import Document
+import requests
+import xml.etree.ElementTree as ET
 import os
 import shutil
 import torch
@@ -24,11 +27,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.getLogger().setLevel(logging.CRITICAL)
-#
-# embedding_function = SentenceTransformerEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
-embedding_function = OpenAIEmbeddings(openai_api_key = "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")
+
+embedding_function = SentenceTransformerEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
 CHROMA_PATH = "chroma"
-instruction = "Represent the query for retrieval:"
+
 
 PROMPT_TEMPLATE = """
 Trả lời câu hỏi dựa trên ngữ cảnh sau đây:
@@ -38,24 +40,27 @@ Trả lời câu hỏi dựa trên ngữ cảnh sau đây:
 Trả lời câu hỏi dựa trên ngữ cảnh trên: {question}
 """
 db = None
-def generate_data_store(pdf_doc):
+def generate_data_store(url):
     global db
-    documents = load_documents(pdf_doc)
-    chunks = split_text(documents)
+    documents = load_documents(url)
+    chunks, split_text_into = split_text(documents)
     db = save_to_chroma(chunks)
-    return db
+    return db, split_text_into
 
-def load_documents(doc_file):
-    _, file_extension = os.path.splitext(doc_file.name)
+def load_documents(url):
+    list_url = url
+    if url.endswith(".xml"):
+        response = requests.get(url)
 
-    if file_extension.lower() == ".pdf":
-        loader = OnlinePDFLoader(doc_file.name)
-    elif file_extension.lower() == ".docx":
-        loader = Docx2txtLoader(doc_file.name)
-    else:
-        print(f"Unsupported file type: {file_extension}")
-        return []
+        if response.status_code == 200:
+            tree = ET.fromstring(response.content)
+            loc_elements = tree.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
 
+            list_url = [loc_element.text for loc_element in loc_elements]
+            print(len(list_url))
+        else:
+            print("Failed to retrieve sitemap. Status code:", response.status_code)
+    loader = WebBaseLoader(list_url)
     documents = loader.load()
     return documents
 
@@ -68,7 +73,7 @@ def split_text(documents):
     )
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} documents into {len(chunks)} chunks.")
-    return chunks
+    return chunks, f"Split {len(documents)} documents into {len(chunks)} chunks."
 
 def save_to_chroma(chunks):
     if os.path.exists(CHROMA_PATH):
@@ -79,36 +84,13 @@ def save_to_chroma(chunks):
     )
 
     db.persist()
-    print(f"Saved {len(chunks)} chunks to {CHROMA_PATH}.")
     return db
 
-def extract_text(file):
-    try:
-        _, file_extension = os.path.splitext(file.name)
 
-        if file_extension.lower() == ".pdf":
-            with open(file.name, "rb") as f:
-                pdf_reader = PyPDF2.PdfFileReader(f)
-                text = "".join(page_obj.extractText() for page_obj in pdf_reader.pages)
-        elif file_extension.lower() == ".txt":
-            with open(file.name, "r", encoding="utf-8") as f:
-                text = f.read()
-        elif file_extension.lower() == ".docx":
-            text = docx2txt.process(file.name)
-        else:
-            print(f"Unsupported file type: {file_extension}")
-            text = ""
-
-        return text
-    except Exception as e:
-        print(f"Error extracting text from the file: {e}")
-        return ""
-
-def build_the_bot(pdf_file, openai_key="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"):
+def build_the_bot(url):
     global db
-    input_text = extract_text(pdf_file)
-    db = generate_data_store(pdf_file)
-    return input_text
+    db,  split_text_into = generate_data_store(url)
+    return split_text_into
 
 def input_question(question):
     global db
@@ -119,7 +101,7 @@ def input_question(question):
     context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
     prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
     prompt = prompt_template.format(context=context_text, question=question)
-    prompt = generate_response(model, tokenizer, prompt)
+    # prompt = generate_response(model, tokenizer, prompt)
     return prompt
 
 def user(user_message, history):
@@ -139,36 +121,36 @@ def generate_response_avahawk(input_text):
         bot_message = input_question(input_text)
         return bot_message
 
-def generate_response(model, tokenizer, instruction, max_new_tokens=1024, temperature=1.0, top_k=50, top_p=0.9):
-    PROMPT_TEMPLATE = "### Câu hỏi:\n{instruction}\n\n### Trả lời:"
-    input_prompt = PROMPT_TEMPLATE.format_map({"instruction": instruction})
-    
-    input_ids = tokenizer(input_prompt, return_tensors="pt")
-    
-    outputs = model.generate(
-        inputs=input_ids["input_ids"].to("cuda"),
-        attention_mask=input_ids["attention_mask"].to("cuda"),
-        do_sample=True,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        max_new_tokens=max_new_tokens,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id
-    )
-    
-    response = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
-    response = response.split("### Trả lời:")[1]
-    
-    return response
-
-
-model_path = "vinai/PhoGPT-7B5-Instruct"
-config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-config.init_device = "cuda"
-model = AutoModelForCausalLM.from_pretrained(model_path, config=config, torch_dtype=torch.bfloat16, trust_remote_code=True)
-model.eval()
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+# def generate_response(model, tokenizer, instruction, max_new_tokens=1024, temperature=1.0, top_k=50, top_p=0.9):
+#     PROMPT_TEMPLATE = "### Câu hỏi:\n{instruction}\n\n### Trả lời:"
+#     input_prompt = PROMPT_TEMPLATE.format_map({"instruction": instruction})
+#
+#     input_ids = tokenizer(input_prompt, return_tensors="pt")
+#
+#     outputs = model.generate(
+#         inputs=input_ids["input_ids"].to("cuda"),
+#         attention_mask=input_ids["attention_mask"].to("cuda"),
+#         do_sample=True,
+#         temperature=temperature,
+#         top_k=top_k,
+#         top_p=top_p,
+#         max_new_tokens=max_new_tokens,
+#         eos_token_id=tokenizer.eos_token_id,
+#         pad_token_id=tokenizer.pad_token_id
+#     )
+#
+#     response = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+#     response = response.split("### Trả lời:")[1]
+#
+#     return response
+#
+#
+# model_path = "vinai/PhoGPT-7B5-Instruct"
+# config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+# config.init_device = "cuda"
+# model = AutoModelForCausalLM.from_pretrained(model_path, config=config, torch_dtype=torch.bfloat16, trust_remote_code=True)
+# model.eval()
+# tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
 with gr.Blocks() as demo:
     gr.Markdown('<h2 style="font-style: italic;">AvaHawk: Document Chatbot with PhoGPT VinAI RAG Integration</h2>')
@@ -192,8 +174,8 @@ with gr.Blocks() as demo:
 
                     Elevate your document interactions with AvaHawk and experience a new level of conversational depth and intelligence.
                 ''')
-        document_types = ['.pdf', '.txt', '.docx']
-        document_file = gr.File(label="Load a document", file_types=document_types, type="filepath")
+
+        document_file = gr.Textbox(label="Urls (comma-separated)", lines=2)
         text_output = gr.Textbox(label="Document content")
         text_button = gr.Button("Build the Bot!!!")
         text_button.click(build_the_bot, [document_file], text_output)
@@ -230,7 +212,8 @@ with gr.Blocks() as demo:
 
 
         def bot(history):
-            bot_message = generate_response(model, tokenizer, history[-1][0])
+            # bot_message = generate_response(model, tokenizer, history[-1][0])
+            bot_message = generate_response_avahawk(history[-1][0])
             history[-1][1] = ""
             for character in bot_message:
                 history[-1][1] += character
