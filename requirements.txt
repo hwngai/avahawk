@@ -14,4 +14,5 @@ einops
 chromadb==0.3.29
 gradio
 docarray
+tiktoken
 
