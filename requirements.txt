@@ -3,6 +3,7 @@ sentence_transformers
 gradio
 pypdf2<3.0
 PyPDF2
+pypdf
 openai
 docx2txt
 pdf2image
@@ -10,4 +11,7 @@ langchain
 InstructorEmbedding
 unstructured
 einops
-chromadb
+chromadb==0.3.29
+gradio
+docarray
+
